@@ -83,20 +83,8 @@ func Get(path string) (FilePerms, error) {
 	return fp, nil
 }
 
-func canRead(path string) bool {
-	f, err := os.Open(path)
-	if err != nil {
-		return false
-	}
-	f.Close()
-	return true
-}
-
-func canWrite(path string) bool {
-	f, err := os.OpenFile(path, os.O_WRONLY|os.O_APPEND, 0)
-	if err != nil {
-		return false
-	}
-	f.Close()
-	return true
-}
+// canRead and canWrite are implemented per-platform:
+//   canaccess_unix.go    — uses os.Open / os.OpenFile (Linux, macOS)
+//   canaccess_windows.go — uses CreateFile with GENERIC_READ/WRITE and full
+//                          share flags, correctly handling UNC paths and
+//                          network share locking behaviour on Windows
