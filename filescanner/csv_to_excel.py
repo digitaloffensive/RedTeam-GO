@@ -369,10 +369,20 @@ def build_summary_sheet(ws, rows: list[dict]):
 def convert(csv_path: str, out_path: str, render_images: bool):
     print(f"[*] Reading CSV: {csv_path}")
     rows = []
-    with open(csv_path, newline="", encoding="utf-8") as f:
-        reader = csv.DictReader(f)
-        for row in reader:
-            rows.append(row)
+    # Using utf-8-sig handles BOMs; errors="replace" prevents crashes on bad bytes
+    try:
+        with open(csv_path, newline="", encoding="utf-8-sig", errors="replace") as f:
+            reader = csv.DictReader(f)
+            for row in reader:
+                rows.append(row)
+    except Exception as e:
+        # Fallback for older Windows-style encodings if utf-8 fails entirely
+        print(f"[!] UTF-8 failed, attempting Latin-1 encoding... ({e})")
+        rows = []
+        with open(csv_path, newline="", encoding="latin-1") as f:
+            reader = csv.DictReader(f)
+            for row in reader:
+                rows.append(row)
 
     print(f"[*] {len(rows)} findings loaded")
 
