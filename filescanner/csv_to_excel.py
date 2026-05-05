@@ -9,7 +9,7 @@ Usage:
     python csv_to_excel.py scan_results.csv --out report.xlsx
     python csv_to_excel.py scan_results.csv --no-images   # skip image rendering
 """
-
+import re
 import argparse
 import base64
 import csv
@@ -133,6 +133,18 @@ def text_to_png_bytes(text: str) -> bytes | None:
 
 # ── Helpers ───────────────────────────────────────────────────────────────────
 
+# Characters that openpyxl/Excel forbid in cell values (illegal XML chars)
+_ILLEGAL_CHARS_RE = re.compile(
+    r"[\x00-\x08\x0b\x0c\x0e-\x1f\x7f]"
+)
+
+def sanitize(value):
+    """Strip illegal XML/Excel control characters from a string value."""
+    if isinstance(value, str):
+        return _ILLEGAL_CHARS_RE.sub("", value)
+    return value
+
+
 def sev_fill(sev: str) -> PatternFill:
     return PatternFill("solid", fgColor=SEVERITY_COLORS.get(sev, "CCCCCC"))
 
@@ -196,15 +208,15 @@ def build_findings_sheet(ws, rows: list[dict], render_images: bool):
 
     # Data rows
     for ri, row in enumerate(rows, start=2):
-        sev = row.get("Severity", "LOW").upper()
+        sev = (row.get("Severity") or "LOW").upper()
 
         # Set row height to accommodate image (or compact if no image)
-        has_ss = bool(row.get("Screenshot_Base64", "").strip())
+        has_ss = bool((row.get("Screenshot_Base64") or "").strip())
         ws.row_dimensions[ri].height = IMG_ROW_HEIGHT if (has_ss and render_images) else 30
 
         col_keys = [c[0] for c in col_defs]
         for ci, key in enumerate(col_keys, start=1):
-            val = row.get(key, "")
+            val = sanitize(row.get(key) or "")
             cell = ws.cell(row=ri, column=ci, value=val)
 
             if key == "Severity":
@@ -217,7 +229,7 @@ def build_findings_sheet(ws, rows: list[dict], render_images: bool):
         ss_cell = ws.cell(row=ri, column=ss_col, value="")
         style_cell(ss_cell, ri)
 
-        b64 = row.get("Screenshot_Base64", "").strip()
+        b64 = (row.get("Screenshot_Base64") or "").strip()
         if b64 and render_images and PIL_AVAILABLE:
             try:
                 raw_text = base64.b64decode(b64).decode("utf-8", errors="replace")
@@ -238,7 +250,7 @@ def build_findings_sheet(ws, rows: list[dict], render_images: bool):
         elif b64 and not render_images:
             # Store decoded text as cell value instead
             try:
-                ss_cell.value = base64.b64decode(b64).decode("utf-8", errors="replace")[:500]
+                ss_cell.value = sanitize(base64.b64decode(b64).decode("utf-8", errors="replace")[:500])
             except Exception:
                 pass
 
@@ -367,6 +379,7 @@ def build_summary_sheet(ws, rows: list[dict]):
 # ── Main ──────────────────────────────────────────────────────────────────────
 
 def convert(csv_path: str, out_path: str, render_images: bool):
+    csv.field_size_limit(sys.maxsize)
     print(f"[*] Reading CSV: {csv_path}")
     rows = []
     # Using utf-8-sig handles BOMs; errors="replace" prevents crashes on bad bytes
