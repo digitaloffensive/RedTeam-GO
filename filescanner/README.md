@@ -1,10 +1,11 @@
-# FileScanner — Sensitive Data Scanner for File Shares
+# FileScanner — Sensitive Data Scanner for File Shares and Local Folders
 
-A fast, modular Go tool that recursively scans file shares for sensitive data —
-credentials, PII, keys, healthcare data, financial info — and logs all findings
-to CSV with file permissions, line numbers, owner information, and a redacted
-content preview. Results can be exported to a rich Excel workbook with embedded
-screenshots, colour-coded severity, and a summary dashboard.
+A fast, modular Go tool that recursively scans network file shares **and local
+folders** for sensitive data — credentials, PII, keys, healthcare data, financial
+info — and logs all findings to CSV with file permissions, line numbers, owner
+information, and a redacted content preview. Results can be exported to a rich
+Excel workbook with embedded screenshots, colour-coded severity, and a summary
+dashboard.
 
 ---
 
@@ -12,6 +13,8 @@ screenshots, colour-coded severity, and a summary dashboard.
 
 | Feature | Detail |
 |---|---|
+| **Dual scan modes** | Network share mode (default) and local folder mode (`--local`) |
+| **Local path resolution** | `~` home expansion, relative → absolute conversion, existence validation |
 | **27 built-in patterns** | Passwords, API keys, AWS keys, SSNs, credit cards, IBAN, PII, HIPAA, certs |
 | **Pause / Resume / Skip** | Live interactive console — pause, resume, skip folders or extensions mid-scan |
 | **File permissions** | Logs Readable/Writable/Executable, owner, Unix mode string, and Windows attribute flags |
@@ -34,6 +37,8 @@ go build -o scanner ./cmd/scanner/
 # Build for Windows (cross-compile from any OS)
 GOOS=windows GOARCH=amd64 go build -o scanner.exe ./cmd/scanner/
 
+# --- Network share mode (default) ---
+
 # Scan a single share
 ./scanner /mnt/fileserver/shared
 
@@ -43,8 +48,24 @@ GOOS=windows GOARCH=amd64 go build -o scanner.exe ./cmd/scanner/
 # Pre-skip extensions and folders at startup
 ./scanner --skip-exts .log,.tmp --skip-folders archive,backup /shares
 
-# Scan only specific extensions
-./scanner --exts .env,.config,.yml,.json /etc /opt
+# --- Local folder mode (--local) ---
+
+# Scan your home directory
+./scanner --local ~/Documents
+
+# Scan multiple local folders, skip dependency directories
+./scanner --local --skip-folders node_modules,vendor /home/user/projects
+
+# Scan only specific extensions in a local path
+./scanner --local --exts .env,.yml,.config ~/projects
+
+# Relative paths and ~ both work in local mode
+./scanner --local . ~/Desktop ../configs
+
+# Windows local folders
+scanner.exe --local C:\Users\alice\Documents C:\Projects
+
+# --- Common options ---
 
 # More workers, larger file size limit
 ./scanner --workers 8 --maxsize 100 /mnt/nas
@@ -56,6 +77,46 @@ python3 csv_to_excel.py results.csv
 # Convert without image rendering (stores decoded text in cell instead)
 python3 csv_to_excel.py results.csv --no-images --out report.xlsx
 ```
+
+---
+
+## Scan Modes
+
+### Network Share Mode (default)
+
+Pass UNC paths or mounted network share paths as arguments. The scanner walks
+each path and warns if an argument looks like a local filesystem path (e.g.
+`/home/...` or `~/...`) rather than a mounted share.
+
+```bash
+./scanner /mnt/fileserver/hr /mnt/fileserver/finance
+./scanner \\fileserver\hr \\fileserver\finance   # Windows UNC
+```
+
+The banner labels the targets as **Shares** and the finding block shows
+`Share :` for each result.
+
+### Local Folder Mode (`--local`)
+
+Pass any local directory paths. The `--local` flag enables:
+
+- **`~` expansion** — `~/Documents` is resolved to the user's home directory on all platforms
+- **Relative → absolute conversion** — paths like `.` or `../configs` are expanded against the current working directory
+- **Existence validation** — the scanner errors early with a clear message if a path does not exist or is not a directory, rather than silently scanning nothing
+
+```bash
+./scanner --local ~/Documents ~/Desktop
+./scanner --local /etc /home/user/projects
+./scanner --local .                          # current directory
+```
+
+The banner labels the targets as **Folders** and the finding block shows
+`Folder:` for each result.
+
+> **Tip:** The underlying walk logic is identical for both modes. `--local`
+> changes path resolution, validation, and console labelling — not scan
+> behaviour. You can use absolute paths without `--local`; the flag is primarily
+> useful for `~` expansion, relative path support, and upfront directory validation.
 
 ---
 
@@ -75,7 +136,10 @@ pip install openpyxl pillow
 | **Summary** | CRITICAL/HIGH/MEDIUM/LOW counts, top files by finding count, pattern breakdown table |
 | **Findings** | All CSV columns colour-coded by severity; `Screenshot` column shows a dark-themed code image with flagged lines highlighted in amber |
 
-The screenshot images are rendered from the base64 content captured during scanning. Each image shows up to 20 matched lines with 2 lines of context above and below, with credential values partially redacted (first 3 characters + asterisks).
+The screenshot images are rendered from the base64 content captured during
+scanning. Each image shows up to 20 matched lines with 2 lines of context above
+and below, with credential values partially redacted (first 3 characters +
+asterisks).
 
 ---
 
@@ -84,7 +148,7 @@ The screenshot images are rendered from the base64 content captured during scann
 | Column | Description |
 |---|---|
 | `ScanDate` | Timestamp of the finding |
-| `SharePath` | Root share path that was scanned |
+| `SharePath` | Root share or local folder path that was scanned |
 | `Folder` | Parent folder of the file |
 | `FileName` | File name |
 | `FileExtension` | File extension |
@@ -111,6 +175,21 @@ with open("scan_results.csv") as f:
 
 ---
 
+## Flags Reference
+
+| Flag | Default | Description |
+|---|---|---|
+| `--local` | `false` | Enable local folder mode: activates `~` expansion, relative path resolution, and directory existence validation |
+| `--out` | `scan_YYYYMMDD_HHMMSS.csv` | Output CSV file path |
+| `--workers` | `4` | Number of concurrent scan goroutines |
+| `--maxsize` | `50` | Maximum file size to scan in MB |
+| `--exts` | *(all text files)* | Comma-separated extensions to scan exclusively |
+| `--skip-exts` | *(none)* | Comma-separated extensions to skip |
+| `--skip-folders` | *(none)* | Comma-separated folder names to skip at startup |
+| `--no-screenshot` | `false` | Disable base64 screenshot capture |
+
+---
+
 ## Interactive Commands
 
 Type these commands in the terminal while a scan is running:
@@ -119,19 +198,21 @@ Type these commands in the terminal while a scan is running:
 p  / pause        — Pause the scan (workers finish their current file then block)
 r  / resume       — Resume a paused scan
 s  / status       — Show live counters: walked, scanned, skipped, findings, current file
-sf <n>         — Skip all folders whose path contains <n>  (e.g: sf archive)
-se <ext>          — Skip all files with extension <ext>          (e.g: se .log)
+sf <name>         — Skip all folders whose name matches <name>  (e.g. sf archive)
+se <ext>          — Skip all files with extension <ext>         (e.g. se .log)
 q  / quit         — Stop the scan and exit
 h  / help         — Show the command list
 ```
 
-Skip commands take effect immediately for the next file picked up by a worker. Already-running files complete normally.
+Skip commands take effect immediately for the next file picked up by a worker.
+Already-running files complete normally.
 
 ---
 
 ## File Permissions
 
-The `Permissions` column captures the effective permissions of the scanning account against each file.
+The `Permissions` column captures the effective permissions of the scanning
+account against each file.
 
 **Linux / macOS example:**
 ```
@@ -161,8 +242,9 @@ The `attrs` field on Windows reflects Win32 `GetFileAttributes` flags:
 
 ## Windows Owner Lookup — How It Works
 
-On Windows, owner resolution uses the Windows Security API via `golang.org/x/sys/windows`.
-This is a fully implemented lookup — not a stub — using four sequential API calls:
+On Windows, owner resolution uses the Windows Security API via
+`golang.org/x/sys/windows`. This is a fully implemented lookup — not a stub —
+using four sequential API calls:
 
 ```
 CreateFile(READ_CONTROL)          ← open a handle with minimal privilege
@@ -171,18 +253,15 @@ CreateFile(READ_CONTROL)          ← open a handle with minimal privilege
       → sid.LookupAccount("")     ← resolve SID → DOMAIN\Username
 ```
 
-If `LookupAccount` fails (e.g. an orphaned SID from a deleted domain account), the
-raw SID string is returned instead (e.g. `S-1-5-21-3623811015-...`) rather than
-erroring out.
+If `LookupAccount` fails (e.g. an orphaned SID from a deleted domain account),
+the raw SID string is returned instead (e.g. `S-1-5-21-3623811015-...`) rather
+than erroring out.
 
 ### Where golang.org/x/sys/windows lives
 
-A common question is where the dependency declaration goes. It does **not** go in
-`main.go`. Here is the complete layout:
-
 | Location | Purpose |
 |---|---|
-| `go.mod` | Declares `require golang.org/x/sys v0.15.0` — the dependency and its version |
+| `go.mod` | Declares `require golang.org/x/sys v0.15.0` |
 | `go.sum` | Cryptographic hashes for integrity verification at build time |
 | `vendor/golang.org/x/sys/windows/` | Full package source, vendored locally — no internet needed to build |
 | `vendor/modules.txt` | Go's vendor index — maps packages to their declared versions |
@@ -190,8 +269,7 @@ A common question is where the dependency declaration goes. It does **not** go i
 
 Because `owner_windows.go` carries `//go:build windows`, the compiler completely
 ignores this file — and the entire `golang.org/x/sys/windows` package — when
-building on Linux or macOS. There is zero runtime penalty and no import on
-non-Windows platforms.
+building on Linux or macOS.
 
 ---
 
@@ -215,10 +293,10 @@ non-Windows platforms.
 filescanner/
 ├── cmd/
 │   └── scanner/
-│       └── main.go                  ← Entry point, CLI flags, interactive console
+│       └── main.go                  ← Entry point, CLI flags, path resolution, interactive console
 ├── internal/
 │   ├── scanner/
-│   │   └── scanner.go               ← Core walk + concurrent scan engine
+│   │   └── scanner.go               ← Core walk + concurrent scan engine (LocalMode-aware)
 │   ├── patterns/
 │   │   └── patterns.go              ← All 27 regex patterns (add new ones here)
 │   ├── control/
@@ -248,11 +326,19 @@ filescanner/
 └── README.md
 ```
 
+### Key files changed in this version
+
+| File | Change |
+|---|---|
+| `cmd/scanner/main.go` | Added `--local` flag; `resolvePaths()` for `~` expansion, relative path resolution, and directory validation; `isLikelyLocalPath()` heuristic for share-mode warnings; updated banner and usage text |
+| `internal/scanner/scanner.go` | Added `LocalMode bool` to `Config`; walk loop and finding output use context-sensitive labels (`share` vs `folder`) |
+
 ---
 
 ## Adding Patterns
 
-Edit `internal/patterns/patterns.go` and add an entry to the `defs` slice inside `DefaultPatterns()`:
+Edit `internal/patterns/patterns.go` and add an entry to the `defs` slice
+inside `DefaultPatterns()`:
 
 ```go
 {
@@ -263,15 +349,15 @@ Edit `internal/patterns/patterns.go` and add an entry to the `defs` slice inside
 },
 ```
 
-Severity must be one of: `CRITICAL`, `HIGH`, `MEDIUM`, `LOW`.
-The pattern is compiled once at startup and applied to every line of every text file scanned.
+Severity must be one of: `CRITICAL`, `HIGH`, `MEDIUM`, `LOW`. The pattern is
+compiled once at startup and applied to every line of every text file scanned.
 
 ---
 
 ## Writing a Plugin
 
-Implement the `plugin.Plugin` interface. Embed `plugin.NoopPlugin` so you only need
-to override the hooks you care about:
+Implement the `plugin.Plugin` interface. Embed `plugin.NoopPlugin` so you only
+need to override the hooks you care about:
 
 ```go
 package alertplugin
@@ -288,7 +374,6 @@ func (p *AlertPlugin) Name() string { return "slack-alerter" }
 
 func (p *AlertPlugin) OnFinding(ctx *plugin.Context, f *output.Finding) {
     if f.Severity == "CRITICAL" {
-        // Post to Slack, send an email, write to a SIEM, etc.
         fmt.Printf("[ALERT] CRITICAL: %s in %s (lines %v)\n",
             f.PatternName, f.FileName, f.LineNumbers)
     }
@@ -336,22 +421,8 @@ go build -o scanner.exe .\cmd\scanner\
 GOOS=windows GOARCH=amd64 go build -o scanner.exe ./cmd/scanner/
 ```
 
-No CGO, no external toolchain required. The `vendor/` directory means no internet
-access is needed at build time — everything is self-contained.
-
----
-
-## Flags Reference
-
-| Flag | Default | Description |
-|---|---|---|
-| `--out` | `scan_YYYYMMDD_HHMMSS.csv` | Output CSV file path |
-| `--workers` | `4` | Number of concurrent scan goroutines |
-| `--maxsize` | `50` | Maximum file size to scan in MB |
-| `--exts` | *(all text files)* | Comma-separated extensions to scan exclusively |
-| `--skip-exts` | *(none)* | Comma-separated extensions to skip |
-| `--skip-folders` | *(none)* | Comma-separated folder names/paths to skip at startup |
-| `--no-screenshot` | `false` | Disable base64 screenshot capture |
+No CGO, no external toolchain required. The `vendor/` directory means no
+internet access is needed at build time — everything is self-contained.
 
 ---
 
