@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
+	"sort"
 	"strings"
 	"sync"
 	"sync/atomic"
@@ -21,22 +22,24 @@ import (
 )
 
 const (
-	// maxFileSize is the largest file we'll attempt to scan (default 50 MB).
 	defaultMaxFileSize = 50 * 1024 * 1024
-	// workerCount is the number of concurrent file-scanning goroutines.
 	defaultWorkerCount = 4
 )
 
 // Config holds scanner configuration.
 type Config struct {
-	Shares          []string
-	OutputCSV       string
-	MaxFileSize     int64
-	WorkerCount     int
-	TakeScreenshot  bool
-	Patterns        []patterns.Pattern
+	Shares         []string
+	OutputCSV      string
+	MaxFileSize    int64
+	WorkerCount    int
+	TakeScreenshot bool
+	Patterns       []patterns.Pattern
 	// ScanExtensions: if non-empty, only files with these extensions are scanned.
 	ScanExtensions []string
+	// LocalMode indicates the targets are local filesystem directories rather
+	// than network shares.  Affects console labels only; the walk logic is
+	// identical for both modes.
+	LocalMode bool
 }
 
 // DefaultConfig returns a Config with sensible defaults.
@@ -51,20 +54,20 @@ func DefaultConfig() Config {
 
 // Stats tracks live progress counters.
 type Stats struct {
-	FilesWalked  atomic.Int64
-	FilesScanned atomic.Int64
-	FilesSkipped atomic.Int64
+	FilesWalked   atomic.Int64
+	FilesScanned  atomic.Int64
+	FilesSkipped  atomic.Int64
 	FindingsTotal atomic.Int64
-	CurrentFile  atomic.Value // stores string
+	CurrentFile   atomic.Value // stores string
 }
 
 // Scanner is the main orchestrator.
 type Scanner struct {
-	cfg      Config
-	ctrl     *control.Controller
-	csv      *output.CSVWriter
-	plugins  *plugin.Registry
-	stats    Stats
+	cfg       Config
+	ctrl      *control.Controller
+	csv       *output.CSVWriter
+	plugins   *plugin.Registry
+	stats     Stats
 	startTime time.Time
 }
 
@@ -87,7 +90,6 @@ func New(cfg Config, ctrl *control.Controller, plugins *plugin.Registry) (*Scann
 func (s *Scanner) Run() error {
 	s.startTime = time.Now()
 
-	// Open CSV writer.
 	cw, err := output.NewCSVWriter(s.cfg.OutputCSV)
 	if err != nil {
 		return fmt.Errorf("open output: %w", err)
@@ -95,11 +97,9 @@ func (s *Scanner) Run() error {
 	defer cw.Close()
 	s.csv = cw
 
-	// File work queue.
 	workCh := make(chan string, s.cfg.WorkerCount*4)
 	var wg sync.WaitGroup
 
-	// Start workers.
 	for i := 0; i < s.cfg.WorkerCount; i++ {
 		wg.Add(1)
 		go func() {
@@ -113,14 +113,20 @@ func (s *Scanner) Run() error {
 		}()
 	}
 
-	// Walk all shares.
+	// Walk all shares/local folders — multiple targets are fully supported.
+	targetLabel := "share"
+	if s.cfg.LocalMode {
+		targetLabel = "folder"
+	}
 	for _, share := range s.cfg.Shares {
 		if s.ctrl.IsStopped() {
 			break
 		}
-		fmt.Printf("[scanner] Walking share: %s\n", share)
+		fmt.Printf("\n  [>] Walking %s: %s\n", targetLabel, share)
 		if err := s.walk(share, workCh); err != nil {
-			fmt.Printf("[scanner] Walk error on %s: %v\n", share, err)
+			if err.Error() != "stopped" {
+				fmt.Printf("  [!] Walk error on %s: %v\n", share, err)
+			}
 		}
 	}
 
@@ -142,15 +148,30 @@ func (s *Scanner) Run() error {
 // Stats returns a pointer to the live stats structure.
 func (s *Scanner) Stats() *Stats { return &s.stats }
 
-// walk recursively enqueues files from root.
+// walk recursively enqueues files from root into workCh.
+//
+// Key fixes vs original:
+//  1. The root path itself is NEVER tested against the skip-folder list.
+//     Only subdirectories encountered during descent are checked.
+//     Previously, if the root share path contained a word that was in the
+//     skip list (e.g. scanning \\server\archive when "archive" was a skip
+//     term), filepath.Walk would call the callback with the root as a dir
+//     first, ShouldSkipFolder would match, and SkipDir would be returned —
+//     silently scanning nothing at all.
+//  2. ShouldSkipFolder now matches only against filepath.Base(path) (the
+//     final directory name component), not the entire path string.  This
+//     prevents a skip term of "logs" from accidentally skipping
+//     "\\fileserver\logs\2024\hr" when only the subfolder "logs" under some
+//     share was intended to be skipped.
 func (s *Scanner) walk(root string, workCh chan<- string) error {
+	root = filepath.Clean(root)
+
 	return filepath.Walk(root, func(path string, info os.FileInfo, err error) error {
 		if err != nil {
-			fmt.Printf("[scanner] Access error: %s: %v\n", path, err)
-			return nil // continue walking
+			fmt.Printf("  [!] Access error: %s — %v\n", path, err)
+			return nil // log and continue walking the rest of the tree
 		}
 
-		// Check stop/pause on every entry.
 		if s.ctrl.IsStopped() {
 			return fmt.Errorf("stopped")
 		}
@@ -159,8 +180,9 @@ func (s *Scanner) walk(root string, workCh chan<- string) error {
 		}
 
 		if info.IsDir() {
-			if s.ctrl.ShouldSkipFolder(path) {
-				fmt.Printf("[scanner] Skipping folder: %s\n", path)
+			// Never apply skip logic to the root itself — only to subdirs.
+			if path != root && s.ctrl.ShouldSkipFolder(filepath.Base(path)) {
+				fmt.Printf("  [~] Skipping folder : %s\n", path)
 				s.stats.FilesSkipped.Add(1)
 				return filepath.SkipDir
 			}
@@ -169,7 +191,6 @@ func (s *Scanner) walk(root string, workCh chan<- string) error {
 
 		s.stats.FilesWalked.Add(1)
 
-		// Extension filter.
 		ext := strings.ToLower(filepath.Ext(path))
 		if s.ctrl.ShouldSkipExt(ext) {
 			s.stats.FilesSkipped.Add(1)
@@ -180,9 +201,8 @@ func (s *Scanner) walk(root string, workCh chan<- string) error {
 			return nil
 		}
 
-		// Size filter.
 		if info.Size() > s.cfg.MaxFileSize {
-			fmt.Printf("[scanner] Skipping large file (%d MB): %s\n", info.Size()/1024/1024, path)
+			fmt.Printf("  [~] Skipping large file (%d MB): %s\n", info.Size()/1024/1024, path)
 			s.stats.FilesSkipped.Add(1)
 			return nil
 		}
@@ -192,7 +212,26 @@ func (s *Scanner) walk(root string, workCh chan<- string) error {
 	})
 }
 
-// scanFile scans one file for sensitive patterns.
+// severityColour returns an ANSI colour prefix for the severity level.
+// Falls back to plain text on terminals that don't support colour.
+func severityColour(sev string) string {
+	switch strings.ToUpper(sev) {
+	case "CRITICAL":
+		return "\033[1;31m" // bold red
+	case "HIGH":
+		return "\033[0;31m" // red
+	case "MEDIUM":
+		return "\033[0;33m" // yellow
+	case "LOW":
+		return "\033[0;32m" // green
+	default:
+		return "\033[0m"
+	}
+}
+
+const colourReset = "\033[0m"
+
+// scanFile scans one file for sensitive patterns and prints enriched findings.
 func (s *Scanner) scanFile(path string) {
 	if !s.ctrl.WaitIfPaused() {
 		return
@@ -205,7 +244,6 @@ func (s *Scanner) scanFile(path string) {
 		return
 	}
 
-	// Skip non-text files.
 	if !isTextFile(path) {
 		s.stats.FilesSkipped.Add(1)
 		return
@@ -213,16 +251,13 @@ func (s *Scanner) scanFile(path string) {
 
 	s.stats.FilesScanned.Add(1)
 
-	// Read file lines.
 	lines, err := readLines(path)
 	if err != nil {
 		return
 	}
 
-	// Get permissions.
 	perms, _ := permissions.Get(path)
 
-	// Plugin: OnFileStart
 	ctx := &plugin.Context{
 		FilePath: path,
 		Info:     info,
@@ -230,11 +265,9 @@ func (s *Scanner) scanFile(path string) {
 	}
 	s.plugins.FireOnFileStart(ctx)
 
-	// Detect patterns.
-	// Map: patternName -> list of line numbers
 	type patternHit struct {
 		lineNums []int
-		preview  string
+		previews []string // one preview per matched line (capped)
 		severity string
 	}
 	hits := make(map[string]*patternHit)
@@ -249,8 +282,9 @@ func (s *Scanner) scanFile(path string) {
 					hits[pat.Name] = h
 				}
 				h.lineNums = append(h.lineNums, lineNum)
-				if h.preview == "" {
-					h.preview = truncateLine(line, 120)
+				// Keep up to 3 line previews per pattern.
+				if len(h.previews) < 3 {
+					h.previews = append(h.previews, truncateLine(strings.TrimSpace(line), 100))
 				}
 			}
 		}
@@ -262,10 +296,11 @@ func (s *Scanner) scanFile(path string) {
 	}
 
 	// Collect all matched line numbers for screenshot.
-	allMatchedLines := []int{}
+	var allMatchedLines []int
 	for _, h := range hits {
 		allMatchedLines = append(allMatchedLines, h.lineNums...)
 	}
+	sort.Ints(allMatchedLines)
 
 	var screenshotData string
 	if s.cfg.TakeScreenshot {
@@ -277,17 +312,89 @@ func (s *Scanner) scanFile(path string) {
 	ext := filepath.Ext(fileName)
 	sharePath := shareRoot(path, s.cfg.Shares)
 
-	for patName, h := range hits {
+	// ── Console output ────────────────────────────────────────────────────
+	// Print a clearly formatted block per file so operators can read the
+	// terminal output without needing to open the CSV.
+	//
+	// Example:
+	//   ┌─ FINDING ────────────────────────────────────────────────────────┐
+	//   │  File       : /data/hr/employees/config.yml
+	//   │  Share      : /data/hr
+	//   │  Permissions: RW- owner:jsmith mode:-rw-r--r--
+	//   │
+	//   │  [CRITICAL] Password in Config          lines: 4, 17
+	//   │             └─ password: "Sup3rS3cret!"
+	//   │             └─ passwd = hunter2
+	//   │
+	//   │  [HIGH]     AWS Access Key               lines: 22
+	//   │             └─ aws_access_key=AKIAIOSFODNN7EXAMPLE
+	//   └──────────────────────────────────────────────────────────────────┘
+
+	sourceLabel := "Share"
+	if s.cfg.LocalMode {
+		sourceLabel = "Folder"
+	}
+
+	fmt.Println()
+	fmt.Println("  ┌─ FINDING " + strings.Repeat("─", 58) + "┐")
+	fmt.Printf("  │  File       : %s\n", path)
+	fmt.Printf("  │  %-11s: %s\n", sourceLabel, sharePath)
+	fmt.Printf("  │  Permissions: %s\n", perms.String())
+	fmt.Println("  │")
+
+	// Sort hits by severity for consistent display order.
+	type namedHit struct {
+		name string
+		hit  *patternHit
+	}
+	sevOrder := map[string]int{"CRITICAL": 0, "HIGH": 1, "MEDIUM": 2, "LOW": 3}
+	var sorted []namedHit
+	for name, h := range hits {
+		sorted = append(sorted, namedHit{name, h})
+	}
+	sort.Slice(sorted, func(i, j int) bool {
+		oi := sevOrder[strings.ToUpper(sorted[i].hit.severity)]
+		oj := sevOrder[strings.ToUpper(sorted[j].hit.severity)]
+		if oi != oj {
+			return oi < oj
+		}
+		return sorted[i].name < sorted[j].name
+	})
+
+	for _, nh := range sorted {
+		h := nh.hit
+		col := severityColour(h.severity)
+		tag := fmt.Sprintf("[%s]", strings.ToUpper(h.severity))
+		lineList := formatLineNums(h.lineNums)
+
+		fmt.Printf("  │  %s%-10s%s %-35s lines: %s\n",
+			col, tag, colourReset, nh.name, lineList)
+
+		for _, preview := range h.previews {
+			fmt.Printf("  │             └─ %s\n", preview)
+		}
+		fmt.Println("  │")
+	}
+
+	fmt.Println("  └" + strings.Repeat("─", 67) + "┘")
+
+	// ── CSV write ─────────────────────────────────────────────────────────
+	for _, nh := range sorted {
+		h := nh.hit
+		preview := ""
+		if len(h.previews) > 0 {
+			preview = h.previews[0]
+		}
 		finding := output.Finding{
 			ScanDate:      time.Now(),
 			SharePath:     sharePath,
 			Folder:        folder,
 			FileName:      fileName,
 			FileExtension: ext,
-			PatternName:   patName,
+			PatternName:   nh.name,
 			Severity:      h.severity,
 			LineNumbers:   h.lineNums,
-			LinePreview:   h.preview,
+			LinePreview:   preview,
 			Permissions:   perms.String(),
 			Owner:         perms.Owner,
 			FileSize:      info.Size(),
@@ -298,31 +405,50 @@ func (s *Scanner) scanFile(path string) {
 		s.plugins.FireOnFinding(ctx, &finding)
 
 		if err := s.csv.Write(finding); err != nil {
-			fmt.Printf("[scanner] CSV write error: %v\n", err)
+			fmt.Printf("  [!] CSV write error: %v\n", err)
 		}
 		s.stats.FindingsTotal.Add(1)
-
-		fmt.Printf("[+] FOUND %-12s  %-45s  lines:%v\n",
-			"["+h.severity+"]",
-			shortenPath(path, 45),
-			h.lineNums,
-		)
 	}
 
 	s.plugins.FireOnFileEnd(ctx)
 }
 
+// formatLineNums formats a slice of line numbers compactly.
+// Up to 8 are shown individually; beyond that a count is appended.
+//   [1, 3, 7]         → "1, 3, 7"
+//   [1..12 total 12]  → "1, 2, 3, 4, 5, 6, 7, 8 (+4 more)"
+func formatLineNums(nums []int) string {
+	if len(nums) == 0 {
+		return ""
+	}
+	const maxShow = 8
+	parts := make([]string, 0, maxShow)
+	for i, n := range nums {
+		if i >= maxShow {
+			parts = append(parts, fmt.Sprintf("(+%d more)", len(nums)-maxShow))
+			break
+		}
+		parts = append(parts, fmt.Sprintf("%d", n))
+	}
+	return strings.Join(parts, ", ")
+}
+
 // shareRoot returns the share root that contains path.
+// It ensures both sides have a trailing separator before comparing so that
+// a share of "/data/hr" does not accidentally match a path of "/data/hr2/...".
 func shareRoot(path string, shares []string) string {
-	for _, s := range shares {
-		if strings.HasPrefix(path, s) {
-			return s
+	cleanPath := filepath.Clean(path)
+	for _, share := range shares {
+		cleanShare := filepath.Clean(share)
+		// Add separator to avoid prefix false-matches between sibling dirs.
+		if strings.HasPrefix(cleanPath+string(filepath.Separator), cleanShare+string(filepath.Separator)) {
+			return share
 		}
 	}
 	return filepath.VolumeName(path)
 }
 
-// readLines reads all lines from a file.
+// readLines reads all lines from a file into a string slice.
 func readLines(path string) ([]string, error) {
 	f, err := os.Open(path)
 	if err != nil {
@@ -332,16 +458,16 @@ func readLines(path string) ([]string, error) {
 
 	var lines []string
 	sc := bufio.NewScanner(f)
-	sc.Buffer(make([]byte, 1024*1024), 1024*1024) // 1 MB line buffer
+	sc.Buffer(make([]byte, 1024*1024), 1024*1024)
 	for sc.Scan() {
 		lines = append(lines, sc.Text())
 	}
 	return lines, sc.Err()
 }
 
-// isTextFile does a quick binary sniff on the first 512 bytes.
+// isTextFile returns true if the file has a known text extension or its
+// first 512 bytes contain no non-printable control characters.
 func isTextFile(path string) bool {
-	// Allow common text-based extensions regardless of content sniff.
 	ext := strings.ToLower(filepath.Ext(path))
 	textExts := map[string]struct{}{
 		".txt": {}, ".log": {}, ".csv": {}, ".json": {}, ".xml": {},
@@ -352,6 +478,8 @@ func isTextFile(path string) bool {
 		".h": {}, ".sql": {}, ".md": {}, ".html": {}, ".htm": {},
 		".properties": {}, ".pem": {}, ".crt": {}, ".key": {},
 		".config": {}, ".tf": {}, ".hcl": {}, ".gradle": {},
+		".dockerfile": {}, ".jenkinsfile": {}, ".gitignore": {},
+		".bashrc": {}, ".profile": {}, ".zshrc": {},
 	}
 	if _, ok := textExts[ext]; ok {
 		return true
@@ -368,7 +496,6 @@ func isTextFile(path string) bool {
 	if err != nil || n == 0 {
 		return false
 	}
-
 	for _, b := range buf[:n] {
 		r := rune(b)
 		if b < 0x09 || (b > 0x0d && b < 0x20 && b != 0x1b) {

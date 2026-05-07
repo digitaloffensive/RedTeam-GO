@@ -7,6 +7,7 @@ import (
 	"os"
 	"os/signal"
 	"path/filepath"
+	"runtime"
 	"strings"
 	"syscall"
 	"time"
@@ -25,13 +26,21 @@ func main() {
 	exts := flag.String("exts", "", "Comma-separated extensions to scan (empty=all text)")
 	skipExtsFlag := flag.String("skip-exts", "", "Comma-separated extensions to skip")
 	skipFoldersFlag := flag.String("skip-folders", "", "Comma-separated folder names/paths to skip")
+	localMode := flag.Bool("local", false, "Scan local folders (enables ~ expansion and local path validation)")
 	flag.Usage = printUsage
 	flag.Parse()
 
-	shares := flag.Args()
-	if len(shares) == 0 {
-		fmt.Fprintln(os.Stderr, "Error: at least one share path is required.")
+	rawPaths := flag.Args()
+	if len(rawPaths) == 0 {
+		fmt.Fprintln(os.Stderr, "Error: at least one path is required.")
 		printUsage()
+		os.Exit(1)
+	}
+
+	// Resolve and validate all paths.
+	shares, err := resolvePaths(rawPaths, *localMode)
+	if err != nil {
+		fmt.Fprintf(os.Stderr, "Error: %v\n", err)
 		os.Exit(1)
 	}
 
@@ -51,6 +60,7 @@ func main() {
 	cfg.WorkerCount = *workers
 	cfg.MaxFileSize = *maxSizeMB * 1024 * 1024
 	cfg.TakeScreenshot = !*noScreenshot
+	cfg.LocalMode = *localMode
 
 	if *exts != "" {
 		for _, e := range strings.Split(*exts, ",") {
@@ -183,12 +193,19 @@ func printHelp() {
 }
 
 func printBanner(cfg scanner.Config, outPath string) {
+	label := "Shares"
+	mode := "Network Share"
+	if cfg.LocalMode {
+		label = "Folders"
+		mode = "Local Folder"
+	}
 	fmt.Print(`
 ╔══════════════════════════════════════════════════════════╗
 ║          FILE SHARE SENSITIVE DATA SCANNER               ║
 ╚══════════════════════════════════════════════════════════╝
 `)
-	fmt.Printf("  Shares    : %s\n", strings.Join(cfg.Shares, ", "))
+	fmt.Printf("  Mode      : %s\n", mode)
+	fmt.Printf("  %-9s : %s\n", label, strings.Join(cfg.Shares, ", "))
 	fmt.Printf("  Output    : %s\n", outPath)
 	fmt.Printf("  Workers   : %d\n", cfg.WorkerCount)
 	fmt.Printf("  Max size  : %d MB\n", cfg.MaxFileSize/1024/1024)
@@ -200,21 +217,108 @@ func printBanner(cfg scanner.Config, outPath string) {
 
 func printUsage() {
 	fmt.Fprintf(os.Stderr, `
-FileScanner — Sensitive Data Scanner for File Shares
+FileScanner — Sensitive Data Scanner for File Shares and Local Folders
 
 Usage:
-  scanner [flags] <share_path> [share_path2 ...]
+  scanner [flags] <path> [path2 ...]
 
 Flags:
 `)
 	flag.PrintDefaults()
 	fmt.Fprintf(os.Stderr, `
+Scan Modes:
+  Network Share (default)
+    Pass UNC paths or mounted network shares as arguments.
+    Example: scanner \\fileserver\hr  \\fileserver\finance
+
+  Local Folder  (--local flag)
+    Pass local directory paths. Supports ~ for home directory.
+    Example: scanner --local ~/Documents ~/Desktop
+             scanner --local /etc /home/user/projects
+             scanner --local C:\Users\alice\Documents
+
 Examples:
+  # Network shares
   scanner /mnt/fileserver/shared
   scanner --out results.csv --workers 8 /data/hr /data/finance
   scanner --skip-exts .log,.tmp --skip-folders archive /shares/ops
-  scanner --exts .env,.config,.yml /etc
+
+  # Local folders
+  scanner --local ~/Documents
+  scanner --local --exts .env,.yml --workers 2 ~/projects
+  scanner --local --skip-folders node_modules,vendor /home/user
+  scanner --local C:\Users\alice\Desktop C:\Projects
 `)
+}
+
+// resolvePaths validates and expands all input paths.
+//   - In local mode: expands ~ to the home directory, converts relative paths
+//     to absolute, and verifies each path exists and is a directory.
+//   - In network/share mode: cleans paths and warns if a path looks local.
+func resolvePaths(rawPaths []string, localMode bool) ([]string, error) {
+	home, _ := os.UserHomeDir()
+	resolved := make([]string, 0, len(rawPaths))
+
+	for _, p := range rawPaths {
+		// Expand ~ regardless of mode so users don't get a confusing error.
+		if strings.HasPrefix(p, "~/") || p == "~" {
+			if home == "" {
+				return nil, fmt.Errorf("cannot expand ~ — home directory unknown")
+			}
+			p = filepath.Join(home, p[1:])
+		}
+
+		p = filepath.Clean(p)
+
+		if localMode {
+			// Make relative paths absolute.
+			if !filepath.IsAbs(p) {
+				cwd, err := os.Getwd()
+				if err != nil {
+					return nil, fmt.Errorf("cannot resolve relative path %q: %v", p, err)
+				}
+				p = filepath.Join(cwd, p)
+			}
+
+			info, err := os.Stat(p)
+			if err != nil {
+				if os.IsNotExist(err) {
+					return nil, fmt.Errorf("local path does not exist: %q", p)
+				}
+				return nil, fmt.Errorf("cannot access local path %q: %v", p, err)
+			}
+			if !info.IsDir() {
+				return nil, fmt.Errorf("local path is not a directory: %q", p)
+			}
+		} else {
+			// In share mode, warn if path looks like a plain local path.
+			if isLikelyLocalPath(p) {
+				fmt.Fprintf(os.Stderr,
+					"  [!] Warning: %q looks like a local path. Use --local for local folders.\n", p)
+			}
+		}
+
+		resolved = append(resolved, p)
+	}
+	return resolved, nil
+}
+
+// isLikelyLocalPath returns true when a path appears to be a local filesystem
+// path rather than a network share (UNC path or mounted share).
+func isLikelyLocalPath(p string) bool {
+	if runtime.GOOS == "windows" {
+		// UNC paths start with \\ — anything else is local.
+		return !strings.HasPrefix(p, `\\`)
+	}
+	// On Unix, network shares are typically mounted under /mnt, /net, /Volumes,
+	// etc.  A path rooted at /home, /tmp, /Users, or ~ is almost certainly local.
+	localPrefixes := []string{"/home/", "/root/", "/tmp/", "/Users/", "/var/", "~"}
+	for _, prefix := range localPrefixes {
+		if strings.HasPrefix(p, prefix) {
+			return true
+		}
+	}
+	return false
 }
 
 type summaryPlugin struct{ plugin.NoopPlugin }
