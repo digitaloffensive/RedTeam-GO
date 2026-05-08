@@ -22,6 +22,28 @@ type Pattern struct {
 	Severity string
 }
 
+// sensitivePatterns is the set of pattern names that contain PHI or SPII.
+// When --redact-sensitive is active, findings from these patterns will have
+// their LinePreview and Screenshot fields suppressed in CSV output and the
+// console preview lines will be hidden.
+var sensitivePatterns = map[string]struct{}{
+	"SSN":            {},
+	"Credit Card":    {},
+	"Date of Birth":  {},
+	"Passport Number": {},
+	"National ID":    {},
+	"NHS Number":     {},
+	"ICD Code":       {},
+	"HIPAA Keywords": {},
+}
+
+// IsSensitivePattern returns true if the named pattern matches PHI or SPII
+// data that should be suppressed when --redact-sensitive is active.
+func IsSensitivePattern(name string) bool {
+	_, ok := sensitivePatterns[name]
+	return ok
+}
+
 // DefaultPatterns returns the built-in set of sensitive data patterns.
 func DefaultPatterns() []Pattern {
 	defs := []struct {

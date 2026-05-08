@@ -27,6 +27,7 @@ func main() {
 	skipExtsFlag := flag.String("skip-exts", "", "Comma-separated extensions to skip")
 	skipFoldersFlag := flag.String("skip-folders", "", "Comma-separated folder names/paths to skip")
 	localMode := flag.Bool("local", false, "Scan local folders (enables ~ expansion and local path validation)")
+	redactSensitive := flag.Bool("redact-sensitive", false, "Suppress LinePreview and Screenshot for PHI/SPII patterns (SSN, credit card, passport, national ID, NHS, ICD, HIPAA, date of birth)")
 	flag.Usage = printUsage
 	flag.Parse()
 
@@ -61,6 +62,7 @@ func main() {
 	cfg.MaxFileSize = *maxSizeMB * 1024 * 1024
 	cfg.TakeScreenshot = !*noScreenshot
 	cfg.LocalMode = *localMode
+	cfg.RedactSensitive = *redactSensitive
 
 	if *exts != "" {
 		for _, e := range strings.Split(*exts, ",") {
@@ -210,7 +212,8 @@ func printBanner(cfg scanner.Config, outPath string) {
 	fmt.Printf("  Workers   : %d\n", cfg.WorkerCount)
 	fmt.Printf("  Max size  : %d MB\n", cfg.MaxFileSize/1024/1024)
 	fmt.Printf("  Patterns  : %d loaded\n", len(cfg.Patterns))
-	fmt.Printf("  Screenshot: %v\n\n", cfg.TakeScreenshot)
+	fmt.Printf("  Screenshot: %v\n", cfg.TakeScreenshot)
+	fmt.Printf("  Redact PHI: %v\n\n", cfg.RedactSensitive)
 	fmt.Println("  Scan running — type 'help' for interactive commands")
 	fmt.Println()
 }
@@ -238,6 +241,10 @@ Scan Modes:
              scanner --local C:\Users\alice\Documents
 
 Examples:
+  # Redact PHI/SPII data samples (recommended for shared/exported results)
+  scanner --redact-sensitive /mnt/fileserver/hr
+  scanner --local --redact-sensitive ~/Documents
+
   # Network shares
   scanner /mnt/fileserver/shared
   scanner --out results.csv --workers 8 /data/hr /data/finance

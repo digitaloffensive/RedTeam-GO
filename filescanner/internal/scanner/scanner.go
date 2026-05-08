@@ -40,6 +40,12 @@ type Config struct {
 	// than network shares.  Affects console labels only; the walk logic is
 	// identical for both modes.
 	LocalMode bool
+	// RedactSensitive suppresses LinePreview, console previews, and Screenshot
+	// for any finding whose pattern is classified as PHI or SPII (SSN, credit
+	// card, passport, national ID, NHS number, ICD code, HIPAA keywords, date
+	// of birth).  All other finding fields (file path, pattern name, severity,
+	// line numbers, permissions, owner) are still written to CSV normally.
+	RedactSensitive bool
 }
 
 // DefaultConfig returns a Config with sensible defaults.
@@ -370,8 +376,12 @@ func (s *Scanner) scanFile(path string) {
 		fmt.Printf("  │  %s%-10s%s %-35s lines: %s\n",
 			col, tag, colourReset, nh.name, lineList)
 
-		for _, preview := range h.previews {
-			fmt.Printf("  │             └─ %s\n", preview)
+		if s.cfg.RedactSensitive && patterns.IsSensitivePattern(nh.name) {
+			fmt.Printf("  │             └─ %s[redacted — PHI/SPII]%s\n", col, colourReset)
+		} else {
+			for _, preview := range h.previews {
+				fmt.Printf("  │             └─ %s\n", preview)
+			}
 		}
 		fmt.Println("  │")
 	}
@@ -381,10 +391,22 @@ func (s *Scanner) scanFile(path string) {
 	// ── CSV write ─────────────────────────────────────────────────────────
 	for _, nh := range sorted {
 		h := nh.hit
+
+		// Determine whether this pattern contains PHI/SPII that must be
+		// suppressed.  When RedactSensitive is active the LinePreview and
+		// Screenshot fields are blanked; everything else is logged normally.
+		isSensitive := s.cfg.RedactSensitive && patterns.IsSensitivePattern(nh.name)
+
 		preview := ""
-		if len(h.previews) > 0 {
+		if !isSensitive && len(h.previews) > 0 {
 			preview = h.previews[0]
 		}
+
+		shot := screenshotData
+		if isSensitive {
+			shot = ""
+		}
+
 		finding := output.Finding{
 			ScanDate:      time.Now(),
 			SharePath:     sharePath,
@@ -398,7 +420,7 @@ func (s *Scanner) scanFile(path string) {
 			Permissions:   perms.String(),
 			Owner:         perms.Owner,
 			FileSize:      info.Size(),
-			Screenshot:    screenshotData,
+			Screenshot:    shot,
 		}
 
 		ctx.Findings = append(ctx.Findings, finding)

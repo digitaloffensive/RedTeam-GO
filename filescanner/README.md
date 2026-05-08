@@ -180,6 +180,7 @@ with open("scan_results.csv") as f:
 | Flag | Default | Description |
 |---|---|---|
 | `--local` | `false` | Enable local folder mode: activates `~` expansion, relative path resolution, and directory existence validation |
+| `--redact-sensitive` | `false` | Suppress `LinePreview` and `Screenshot` for PHI/SPII patterns. All other fields (path, pattern name, severity, line numbers, permissions) are still logged. See [PHI/SPII Redaction](#phispii-redaction) below. |
 | `--out` | `scan_YYYYMMDD_HHMMSS.csv` | Output CSV file path |
 | `--workers` | `4` | Number of concurrent scan goroutines |
 | `--maxsize` | `50` | Maximum file size to scan in MB |
@@ -187,6 +188,70 @@ with open("scan_results.csv") as f:
 | `--skip-exts` | *(none)* | Comma-separated extensions to skip |
 | `--skip-folders` | *(none)* | Comma-separated folder names to skip at startup |
 | `--no-screenshot` | `false` | Disable base64 screenshot capture |
+
+---
+
+## PHI/SPII Redaction (`--redact-sensitive`)
+
+When scanning environments that may contain patient records or government-issued
+identifiers, use `--redact-sensitive` to prevent actual sensitive values from
+being written to the output CSV or appearing in the terminal.
+
+```bash
+# Recommended for any scan where the CSV will be shared, exported, or stored
+./scanner --redact-sensitive /mnt/fileserver/hr
+./scanner --local --redact-sensitive ~/Documents
+```
+
+### What is suppressed
+
+| Field | Normal mode | `--redact-sensitive` |
+|---|---|---|
+| `LinePreview` | First matching line (truncated) | **Empty** |
+| `Screenshot_Base64` | Base64-encoded context block | **Empty** |
+| Console preview lines | Shown under each finding | Replaced with `[redacted — PHI/SPII]` |
+
+### What is still logged
+
+All other finding fields are written to CSV unchanged:
+
+`ScanDate`, `SharePath`, `Folder`, `FileName`, `FileExtension`, `PatternName`,
+`Severity`, `LineNumbers`, `Permissions`, `Owner`, `FileSizeBytes`
+
+This means you still know **where** the data lives and **what type** it is —
+just not the actual value.
+
+### Patterns covered
+
+The following patterns are classified as PHI or SPII and are suppressed when
+`--redact-sensitive` is active:
+
+| Pattern | Category |
+|---|---|
+| `SSN` | SPII — US Social Security Number |
+| `Credit Card` | SPII — Payment card number |
+| `Passport Number` | SPII — Government-issued travel document |
+| `National ID` | SPII — National/government ID number |
+| `Date of Birth` | SPII — Date of birth label with value |
+| `NHS Number` | PHI — UK National Health Service identifier |
+| `ICD Code` | PHI — Medical diagnosis code |
+| `HIPAA Keywords` | PHI — Patient ID, MRN, diagnosis, prescription, medication |
+
+All other patterns (credentials, API keys, AWS keys, connection strings, etc.)
+are unaffected — their previews and screenshots are always captured.
+
+### Adding patterns to the sensitive list
+
+Edit `internal/patterns/patterns.go` and add the pattern name to the
+`sensitivePatterns` map:
+
+```go
+var sensitivePatterns = map[string]struct{}{
+    "SSN":             {},
+    "My New PHI Pattern": {}, // ← add here
+    // ...
+}
+```
 
 ---
 
@@ -330,8 +395,9 @@ filescanner/
 
 | File | Change |
 |---|---|
-| `cmd/scanner/main.go` | Added `--local` flag; `resolvePaths()` for `~` expansion, relative path resolution, and directory validation; `isLikelyLocalPath()` heuristic for share-mode warnings; updated banner and usage text |
-| `internal/scanner/scanner.go` | Added `LocalMode bool` to `Config`; walk loop and finding output use context-sensitive labels (`share` vs `folder`) |
+| `cmd/scanner/main.go` | Added `--local` flag; `resolvePaths()` for `~` expansion, relative path resolution, and directory validation; `isLikelyLocalPath()` heuristic for share-mode warnings; `--redact-sensitive` flag wired to `cfg.RedactSensitive`; banner shows `Redact PHI` line; updated usage text |
+| `internal/scanner/scanner.go` | Added `LocalMode bool` and `RedactSensitive bool` to `Config`; walk loop and finding output use context-sensitive labels; console preview lines and CSV `LinePreview`/`Screenshot` fields are suppressed per-finding when pattern is PHI/SPII and `RedactSensitive` is active |
+| `internal/patterns/patterns.go` | Added `sensitivePatterns` map and `IsSensitivePattern(name string) bool` helper used by the scanner engine to identify PHI/SPII patterns at runtime |
 
 ---
 
