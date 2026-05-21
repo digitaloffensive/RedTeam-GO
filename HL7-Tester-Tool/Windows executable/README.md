@@ -160,6 +160,10 @@ Use this when loading real captured HL7 that is not getting an ACK.
 | `-interactive` | Launch interactive shell for manual message sending and testing. |
 | `-edit` | Launch the message editor to build, modify, or paste HL7 messages. |
 | `-fuzz` | Load a captured HL7 file and fuzz its field values while sending live. See fuzzer section. |
+| `-pcap <file>` | Extract HL7 messages from a `.pcap` or `.pcapng` network capture. No receiver connection needed. |
+| `-pcap-out <file>` | Save messages extracted by `-pcap` to a `.hl7` file for use with `-file` |
+| `-scan <target>` | Scan a host or CIDR for open HL7 MLLP listeners. Example: `-scan 172.31.0.0/24` |
+| `-scan-ports <list>` | Ports to probe during `-scan` (default: `2575,2576,6661,6662,8080,8443,8888,9090`) |
 
 ---
 
@@ -325,6 +329,60 @@ editor> save
 
 ---
 
+## PCAP Analyser
+
+Extracts HL7 messages directly from a Wireshark or tcpdump network capture file.
+No connection to the receiver needed. Supports `.pcap` and `.pcapng` formats.
+Pure Go — no Wireshark installation, no libpcap, no Python required.
+
+```cmd
+REM Extract and display messages from a capture
+hl7-security-tester.exe -pcap capture.pcap
+
+REM Extract and save to a file for immediate use in testing
+hl7-security-tester.exe -pcap capture.pcap -pcap-out extracted.hl7
+
+REM Then test with the real extracted messages
+hl7-security-tester.exe -host 172.31.1.213 -port 2451 -tls-auto -file extracted.hl7
+```
+
+**What the output shows:**
+- Total packets scanned and HL7 packets identified
+- Communication flow map — who is talking to whom, how many messages, which types
+- All unique IP endpoints observed on the clinical network
+- Per-message detail: timestamp, type, ID, sending app, PHI fields detected
+
+**Typical workflow with a Wireshark capture:**
+1. Run Wireshark on any machine on the clinical network (or use a span port)
+2. Save the capture as `.pcap` or `.pcapng`
+3. Run: `hl7-security-tester.exe -pcap capture.pcap -pcap-out real_messages.hl7`
+4. Use `-file real_messages.hl7` with any other test flags
+
+---
+
+## HL7 Port Scanner
+
+Scans a host or network range to discover HL7 MLLP listeners you may not know
+exist. Confirms each open port is actually an HL7 receiver by running an MLLP probe.
+
+```cmd
+REM Scan a single host
+hl7-security-tester.exe -scan 172.31.1.213
+
+REM Scan a subnet
+hl7-security-tester.exe -scan 172.31.0.0/24
+
+REM Scan with TLS auto-detection
+hl7-security-tester.exe -scan 172.31.0.0/24 -tls-auto
+
+REM Custom ports
+hl7-security-tester.exe -scan 172.31.0.0/24 -scan-ports 2575,2576,6661,9090
+```
+
+Default ports probed: `2575`, `2576`, `6661`, `6662`, `8080`, `8443`, `8888`, `9090`
+
+---
+
 ## Fuzzer
 
 Load a captured HL7 file and automatically fuzz field values while sending
@@ -473,6 +531,19 @@ may be accepted when your real message file has issues. Run with `-sanitize` too
 ---
 
 ## Common Workflows
+
+**Discover HL7 listeners on an unknown network:**
+```cmd
+hl7-security-tester.exe -scan 172.31.0.0/24
+hl7-security-tester.exe -scan 172.31.0.0/24 -tls-auto
+```
+
+**Extract real messages from a network capture then test with them:**
+```cmd
+hl7-security-tester.exe -pcap hospital_traffic.pcap -pcap-out real_messages.hl7
+hl7-security-tester.exe -host 172.31.1.213 -port 2451 -tls-auto ^
+  -file real_messages.hl7 -sanitize
+```
 
 **First run against a new receiver:**
 ```cmd
