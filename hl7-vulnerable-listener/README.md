@@ -334,3 +334,88 @@ Each vulnerability is a clearly commented block in `processMessage()` with the v
 ## Legal & Ethical Notice
 
 This tool is for **authorized security testing only** in isolated lab environments. Never deploy on a network that carries real Protected Health Information (PHI). The fake patient data (names, MRNs, SSNs) used in responses is entirely synthetic and does not correspond to any real individual.
+
+---
+
+## Advanced Vulnerabilities (Added v1.1)
+
+Four additional vulnerabilities were added to match the tester's advanced test suite. These correspond to the `seginject`, `tampering`, `injection`, and `audit` tests.
+
+### Vulnerability 13 — Segment Injection (`-no-seg-inject-check`)
+
+**VULN:** Accepts messages where field values contain embedded `\r` characters that create fake HL7 segments — the Black Hat 2018 / ERNW 2020 attack vector. An attacker can inject fake `RXE` medication orders, `DG1` diagnoses, a second `MSH` to override message type, or `ZAD` Z-segments claiming admin privileges.
+
+**FIX:** Scans every field value for embedded carriage returns. Rejects the message if any field contains `\r` or `\n`. Also detects and rejects `ZAD`/`ZADMIN` segment names.
+
+```bash
+# Vulnerable — accepts segment injection
+./hl7-vulnerable-listener -port 2575 -mode custom -no-seg-inject-check=true
+
+# Fixed — rejects segment injection
+./hl7-vulnerable-listener -port 2576 -mode custom -no-seg-inject-check=false
+```
+
+### Vulnerability 14 — Field Value Validation (`-no-field-validation`)
+
+**VULN:** Accepts physiologically impossible field values — a 99999mg medication dose, a WBC count of 999999, a date of birth in the year 2999, or a negative age. No range checking on OBX observation values or PID date fields.
+
+**FIX:** Validates OBX-5 numeric values against a plausible physiological range (rejects values above 99999 or below -9999). Validates PID-7 DOB year against 1900–2100.
+
+```bash
+# Vulnerable — accepts impossible clinical values
+./hl7-vulnerable-listener -port 2575 -mode custom -no-field-validation=true
+
+# Fixed — rejects impossible values
+./hl7-vulnerable-listener -port 2576 -mode custom -no-field-validation=false
+```
+
+### Vulnerability 15 — Advanced Injection Detection (`-no-injection-detection`)
+
+**VULN:** Accepts advanced injection payloads not caught by the basic injection check — LDAP injection (`*)(uid=*`), template injection (`{{7*7}}`, `${7*7}`), format strings (`%s%s%s`, `%n`), and targeted shell substitution (`$(curl`, `$(wget`).
+
+**FIX:** Scans all field values for advanced injection patterns in addition to the basic SQL/XSS/shell check (VULN 5).
+
+```bash
+# Vulnerable — accepts LDAP/format/template injection
+./hl7-vulnerable-listener -port 2575 -mode custom -no-injection-detection=true
+
+# Fixed — rejects all injection patterns
+./hl7-vulnerable-listener -port 2576 -mode custom -no-injection-detection=false
+```
+
+### Vulnerability 16 — Audit Log Timing (`-audit-delay`)
+
+**VULN:** Responses are suspiciously uniform and fast — no per-message audit write occurs, so processing time is nearly constant across all messages. The tester's audit trail weakness test uses response timing analysis to detect this.
+
+**FIX:** Introduces a 5ms simulated audit write delay per message, creating measurable response time variance that indicates real per-message logging activity.
+
+```bash
+# Vulnerable — no audit delay (uniform fast responses)
+./hl7-vulnerable-listener -port 2575 -mode custom -audit-delay=false
+
+# Fixed — audit write delay active
+./hl7-vulnerable-listener -port 2576 -mode custom -audit-delay=true
+```
+
+---
+
+## Updated Vulnerability Table
+
+| # | Vulnerability | Flag | Tester Test |
+|---|---|---|---|
+| 1 | Plaintext transport | `-no-tls` | `encryption` |
+| 2 | No sender authentication | `-no-auth` | `spoof` |
+| 3 | No timestamp validation | `-no-timestamp` | `timestamp` |
+| 4 | No duplicate ID detection | `-no-duplicate` | `replay` |
+| 5 | No input sanitisation (basic) | `-no-sanitise` | `injection` |
+| 6 | No message size limits | `-no-size-limit` | `oversize` |
+| 7 | No connection rate limiting | `-no-rate-limit` | `flood` |
+| 8 | No idle connection timeout | `-no-idle-timeout` | `slow` |
+| 9 | PHI echoed in errors | `-echo-phi` | `nackleak` |
+| 10 | Stack traces in errors | `-stack-trace` | `errleakage` |
+| 11 | Patient enumeration | `-enum-patients` | `enum` |
+| 12 | No version check | `-no-version-check` | `malformed` |
+| 13 | Segment injection | `-no-seg-inject-check` | `seginject` |
+| 14 | No field value validation | `-no-field-validation` | `tampering` |
+| 15 | Advanced injection patterns | `-no-injection-detection` | `injection` |
+| 16 | No audit log delay | `-audit-delay` | `audit` |

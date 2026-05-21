@@ -79,6 +79,12 @@ type VulnConfig struct {
 
 	// Version
 	NoVersionCheck bool // VULN 12: accept any HL7 version string
+
+	// Advanced vulnerability flags — match the tester's advanced test suite
+	NoSegmentInjectionCheck bool // VULN 13: accept messages with embedded \r segment injection
+	NoFieldValidation       bool // VULN 14: accept physiologically impossible field values
+	NoInjectionDetection    bool // VULN 15: accept SQL/shell/XSS/LDAP injection in all fields
+	AuditLogDelay           bool // VULN 16: no per-message audit write delay (timing oracle)
 }
 
 // AllVulnerable returns a config with every vulnerability enabled.
@@ -96,7 +102,11 @@ func AllVulnerable() VulnConfig {
 		EchoPhiInErrors:    true,
 		StackTraceInErrors: true,
 		ReturnPatientData:  true,
-		NoVersionCheck:     true,
+		NoVersionCheck:          true,
+		NoSegmentInjectionCheck: true,
+		NoFieldValidation:       true,
+		NoInjectionDetection:    true,
+		AuditLogDelay:           false,
 	}
 }
 
@@ -115,7 +125,11 @@ func AllFixed() VulnConfig {
 		EchoPhiInErrors:    false,
 		StackTraceInErrors: false,
 		ReturnPatientData:  false,
-		NoVersionCheck:     false,
+		NoVersionCheck:          false,
+		NoSegmentInjectionCheck: false,
+		NoFieldValidation:       false,
+		NoInjectionDetection:    false,
+		AuditLogDelay:           true,
 	}
 }
 
@@ -342,6 +356,110 @@ func (s *Server) processMessage(raw, remote string) string {
 				return s.buildACK(parsed, "AE", "Message rejected: invalid characters in field content", false)
 			}
 		}
+	}
+
+	// ── VULN 13: Segment injection via embedded \r in field values ───────────
+	// Matches tester TestSegmentInjection — Black Hat 2018 / ERNW 2020 attack.
+	// FIX: reject messages where any field value contains a carriage return
+	// (i.e. more segments than the MLLP frame header implied).
+	if !s.cfg.NoSegmentInjectionCheck {
+		expectedSegs := len(strings.Split(strings.TrimSpace(raw), "\r"))
+		// Check all field values for embedded \r that would create a fake segment
+		for _, line := range strings.Split(raw, "\r") {
+			fields := strings.Split(line, "|")
+			for _, f := range fields[1:] {
+				if strings.ContainsAny(f, "\r\n") {
+					atomic.AddInt64(&s.rejectCount, 1)
+					s.logf("SECURITY", remote, fmt.Sprintf("Segment injection detected: embedded CR in field value (segments expected=%d)", expectedSegs))
+					return s.buildACK(parsed, "AE", "Message rejected: invalid segment structure", false)
+				}
+			}
+		}
+		// Also reject suspicious Z-segment privilege escalation patterns
+		for _, line := range strings.Split(raw, "\r") {
+			if strings.HasPrefix(line, "ZAD|") || strings.HasPrefix(line, "ZADMIN|") {
+				s.logf("SECURITY", remote, "Z-segment privilege escalation attempt detected")
+				return s.buildACK(parsed, "AR", "Unauthorised segment type", false)
+			}
+		}
+	}
+
+	// ── VULN 14: No field validation — physiologically impossible values ──────
+	// Matches tester TestFieldTampering.
+	// FIX: validate numeric OBX values against plausible physiological ranges
+	// and reject impossible dates in PID-7.
+	if !s.cfg.NoFieldValidation {
+		for _, line := range strings.Split(raw, "\r") {
+			fields := strings.Split(line, "|")
+			if len(fields) < 2 {
+				continue
+			}
+			switch fields[0] {
+			case "OBX":
+				// OBX-5 is the observation value — check for obviously impossible numbers
+				if len(fields) > 5 {
+					val := strings.TrimSpace(fields[5])
+					var fval float64
+					if n, _ := fmt.Sscanf(val, "%f", &fval); n == 1 {
+						if fval > 99999 || fval < -9999 {
+							atomic.AddInt64(&s.rejectCount, 1)
+							s.logf("SECURITY", remote, fmt.Sprintf("Field validation: impossible OBX value %s", val))
+							return s.buildACK(parsed, "AE", fmt.Sprintf("OBX value out of acceptable range: %s", val), false)
+						}
+					}
+				}
+			case "PID":
+				// PID-7 is DOB — reject dates in the far future
+				if len(fields) > 7 {
+					dob := strings.TrimSpace(fields[7])
+					if len(dob) >= 4 {
+						var year int
+						if n, _ := fmt.Sscanf(dob[:4], "%d", &year); n == 1 {
+							if year > 2100 || year < 1900 {
+								s.logf("SECURITY", remote, fmt.Sprintf("Field validation: impossible DOB year %d", year))
+								return s.buildACK(parsed, "AE", "PID-7 date of birth is invalid", false)
+							}
+						}
+					}
+				}
+			}
+		}
+	}
+
+	// ── VULN 15: No injection detection in all fields ─────────────────────────
+	// Matches tester TestInjectionAttacks — comprehensive SQL/shell/XSS/LDAP.
+	// FIX: scan every field value for known injection patterns including
+	// LDAP injection, format strings, and shell command substitution.
+	if !s.cfg.NoInjectionDetection {
+		advancedSignals := []string{
+			// LDAP injection
+			"*)(uid=*", ")(|(uid=",
+			// Format strings
+			"%s%s%s", "%n%n", "%-100s",
+			// Template injection
+			"{{7*7}}", "${7*7}", "#{7*7}",
+			// Path traversal
+			"../../../", "..\\..\\",
+			// Shell substitution not caught by basic check
+			"$(curl", "$(wget", "$(ping",
+		}
+		rawUpper := strings.ToUpper(raw)
+		for _, sig := range advancedSignals {
+			if strings.Contains(rawUpper, strings.ToUpper(sig)) {
+				atomic.AddInt64(&s.rejectCount, 1)
+				s.logf("SECURITY", remote, fmt.Sprintf("Advanced injection payload: %q", sig))
+				return s.buildACK(parsed, "AE", "Message rejected: invalid field content", false)
+			}
+		}
+	}
+
+	// ── VULN 16: Audit log delay ──────────────────────────────────────────────
+	// Matches tester TestAuditTrailWeakness timing analysis.
+	// FIX: introduce a small consistent write delay to simulate real audit logging.
+	// Vulnerable mode: no delay (responses are suspiciously uniform and fast).
+	if s.cfg.AuditLogDelay {
+		// Simulate ~5ms audit write — creates measurable timing variance
+		time.Sleep(5 * time.Millisecond)
 	}
 
 	// ── VULN 6: No message size limit ─────────────────────────────────────────
@@ -652,6 +770,10 @@ func (s *Server) printVulnStatus() {
 		{"Stack trace in errors",  s.cfg.StackTraceInErrors, "EXPOSED — internals in error responses",   "Generic error messages only"},
 		{"Patient enumeration",    s.cfg.ReturnPatientData,  "OPEN — QRY returns patient records",       "Authentication required"},
 		{"Version check",          s.cfg.NoVersionCheck,     "NONE — any HL7 version accepted",          "Version 2.x enforced"},
+		{"Segment injection check",s.cfg.NoSegmentInjectionCheck, "NONE — \\r injection accepted",          "Embedded CR in fields rejected"},
+		{"Field value validation", s.cfg.NoFieldValidation,   "NONE — impossible values accepted",        "Range check on OBX/PID fields"},
+		{"Advanced injection",     s.cfg.NoInjectionDetection,"NONE — LDAP/format/template accepted",     "All injection patterns rejected"},
+		{"Audit log timing",       !s.cfg.AuditLogDelay,      "NONE — uniform fast responses",            "5ms audit write delay active"},
 	}
 
 	fmt.Println("  Vulnerability Status:")
@@ -696,7 +818,11 @@ func main() {
 	echoPHI        := flag.Bool("echo-phi",           true,  "Echo patient data in error responses")
 	stackTrace     := flag.Bool("stack-trace",        true,  "Include stack traces in error responses")
 	enumPatients   := flag.Bool("enum-patients",      true,  "Return patient data to unauthenticated queries")
-	noVersionCheck := flag.Bool("no-version-check",   true,  "Accept any HL7 version")
+	noVersionCheck        := flag.Bool("no-version-check",        true,  "Accept any HL7 version")
+	noSegInjectCheck      := flag.Bool("no-seg-inject-check",     true,  "Accept messages with embedded \\r segment injection (VULN 13)")
+	noFieldValidation     := flag.Bool("no-field-validation",     true,  "Accept physiologically impossible field values (VULN 14)")
+	noInjectionDetection  := flag.Bool("no-injection-detection",  true,  "Accept LDAP/format string/template injection payloads (VULN 15)")
+	auditDelay            := flag.Bool("audit-delay",             false, "Add 5ms audit write delay to responses (simulates real audit logging)")
 
 	flag.Usage = func() {
 		fmt.Fprintf(os.Stderr, `
@@ -766,7 +892,11 @@ EXAMPLES:
 			EchoPhiInErrors:    *echoPHI,
 			StackTraceInErrors: *stackTrace,
 			ReturnPatientData:  *enumPatients,
-			NoVersionCheck:     *noVersionCheck,
+			NoVersionCheck:          *noVersionCheck,
+			NoSegmentInjectionCheck: *noSegInjectCheck,
+			NoFieldValidation:       *noFieldValidation,
+			NoInjectionDetection:    *noInjectionDetection,
+			AuditLogDelay:           *auditDelay,
 		}
 		fmt.Println("  Mode: CUSTOM")
 	default:
