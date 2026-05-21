@@ -173,6 +173,10 @@ Automatically fixes common ACK-blocking issues before sending captured messages.
 | `-interactive` | Launch interactive shell for manual testing |
 | `-edit` | Launch the message editor |
 | `-fuzz <file>` | Load a captured HL7 file and fuzz its fields while sending live |
+| `-pcap <file>` | Extract HL7 messages from a `.pcap` or `.pcapng` network capture file. No connection to the receiver needed — reads HL7 directly from captured traffic. |
+| `-pcap-out <file>` | Save messages extracted by `-pcap` to a `.hl7` file for immediate use with `-file` |
+| `-scan <target>` | Scan a host or CIDR range for open HL7 MLLP listeners. Examples: `-scan 10.0.0.1` or `-scan 10.0.0.0/24` |
+| `-scan-ports <ports>` | Comma-separated ports to probe during `-scan` (default: `2575,2576,6661,6662,8080,8443,8888,9090`) |
 
 ### FUZZER FLAGS
 
@@ -375,6 +379,64 @@ editor> add-seg 1 after 3 DG1|1||I10^HYPERTENSION^ICD10
 
 ---
 
+## PCAP Analyser
+
+Extracts HL7 messages directly from a Wireshark or tcpdump network capture file.
+No connection to the receiver is needed — reads raw TCP streams from the capture,
+reassembles them, strips MLLP framing, and pulls out every HL7 message found.
+
+Supports `.pcap` (legacy) and `.pcapng` (modern) formats. Pure Go — no libpcap,
+no Wireshark installation, no Python required.
+
+```bash
+# Extract and display messages from a capture
+./hl7-security-tester -pcap capture.pcap
+
+# Extract and save to a file for immediate use in testing
+./hl7-security-tester -pcap capture.pcap -pcap-out extracted.hl7
+
+# Then test with the extracted real messages
+./hl7-security-tester -host 10.0.0.5 -port 2575 -tls-auto -file extracted.hl7
+```
+
+**What the PCAP report shows:**
+- Total packets and HL7 packets identified
+- Communication flow map — source IP/port → destination IP/port, message count, message types
+- All unique endpoints observed
+- Per-message detail: timestamp, type, ID, sending app, PHI fields detected
+
+**Typical workflow with a span port or TAP:**
+1. Capture traffic on the clinical network with Wireshark or tcpdump
+2. Save as `.pcap` or `.pcapng`
+3. Run `-pcap capture.pcap -pcap-out real_messages.hl7`
+4. Use `-file real_messages.hl7` to test with the exact messages the real devices send
+
+---
+
+## HL7 Port Scanner
+
+Scans a host or network range to discover HL7 MLLP listeners. For each open port
+it runs an MLLP probe to confirm it is actually an HL7 receiver — not just an open
+TCP port.
+
+```bash
+# Scan a single host on all default HL7 ports
+./hl7-security-tester -scan 10.0.0.5
+
+# Scan a subnet (supports /24 and smaller CIDR ranges)
+./hl7-security-tester -scan 10.0.0.0/24
+
+# Scan custom ports
+./hl7-security-tester -scan 10.0.0.0/24 -scan-ports 2575,2576,6661,9090
+
+# Scan with TLS probe (tries TLS if plaintext gets no HL7 response)
+./hl7-security-tester -scan 10.0.0.5 -tls-auto
+```
+
+Default ports probed: `2575`, `2576`, `6661`, `6662`, `8080`, `8443`, `8888`, `9090`
+
+---
+
 ## Fuzzer
 
 Loads real captured HL7 from a file and automatically mutates field values
@@ -536,6 +598,7 @@ pkg/editor/editor.go            Interactive message editor shell
 pkg/editor/fuzzer.go            Field fuzzer with 6 strategies and anomaly detection
 pkg/editor/sanitizer.go         Auto-sanitizer for captured messages
 pkg/reporter/report.go          Text and JSON report generation
+pkg/pcap/pcap.go                Pure-Go PCAP/PCAPNG parser and HL7 stream extractor
 testdata/sample_messages.hl7    Sample ADT, ORU, RDE messages
 testdata/captured_vitals.hl7    Real captured ventilator/patient monitor message
 ```
@@ -543,6 +606,18 @@ testdata/captured_vitals.hl7    Real captured ventilator/patient monitor message
 ---
 
 ## Common Workflows
+
+**Discover unknown HL7 listeners on a network:**
+```bash
+./hl7-security-tester -scan 10.0.0.0/24
+./hl7-security-tester -scan 172.31.0.0/24 -tls-auto
+```
+
+**Extract messages from a network capture then test with them:**
+```bash
+./hl7-security-tester -pcap hospital_traffic.pcap -pcap-out real_messages.hl7
+./hl7-security-tester -host 10.0.0.5 -port 2575 -tls-auto -file real_messages.hl7 -sanitize
+```
 
 **First run against a new receiver:**
 ```bash
