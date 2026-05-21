@@ -6,13 +6,17 @@ import (
 	"bufio"
 	"flag"
 	"fmt"
+	"net"
 	"os"
+	"sort"
 	"strconv"
 	"strings"
+	"sync"
 	"time"
 
 	"github.com/hl7-security-tester/pkg/editor"
 	"github.com/hl7-security-tester/pkg/hl7"
+	"github.com/hl7-security-tester/pkg/pcap"
 	"github.com/hl7-security-tester/pkg/reporter"
 	"github.com/hl7-security-tester/pkg/security"
 	"github.com/hl7-security-tester/pkg/transport"
@@ -66,6 +70,14 @@ func main() {
 	editMode    := flag.Bool("edit", false, "Launch the message editor to add/modify/paste HL7 segments")
 	probeOnly   := flag.Bool("probe", false, "Send a minimal ADT^A01 probe message and verify ACK AA before anything else.\n\t\t\tUse this first to confirm the receiver is accepting messages correctly.\n\t\t\tDiagnoses connection, MLLP, ACK code, and MSH identity issues.")
 	skipProbe   := flag.Bool("skip-probe", false, "Skip the automatic ACK probe that runs before security tests.")
+
+	// PCAP analysis
+	pcapFile    := flag.String("pcap", "", "Extract HL7 messages from a .pcap or .pcapng network capture file.\n\t\t\tNo connection to the receiver needed — reads HL7 directly from captured traffic.\n\t\t\tUseful when you have a Wireshark/tcpdump capture from a span port or TAP.")
+	pcapOut     := flag.String("pcap-out", "", "Save extracted HL7 messages to this .hl7 file for use with -file")
+
+	// HL7 port scanner
+	scanRange   := flag.String("scan", "", "Scan a host or CIDR range for open HL7 MLLP ports.\n\t\t\tExamples: -scan 10.0.0.1  -scan 10.0.0.0/24")
+	scanPorts   := flag.String("scan-ports", "2575,2576,6661,6662,8080,8443,8888,9090", "Comma-separated ports to probe during -scan")
 
 	// Fuzzer flags
 	fuzzFile     := flag.String("fuzz", "", "Load captured HL7 from this file and auto-fuzz fields while sending.\n\t\t\tCombine with -fuzz-iter, -fuzz-strategy, -fuzz-seg, -fuzz-out etc.")
@@ -197,6 +209,35 @@ func main() {
 		} else {
 			os.Exit(1)
 		}
+	}
+
+	// ── PCAP analysis mode ───────────────────────────────────────────────────
+	if *pcapFile != "" {
+		fmt.Printf("  Analysing capture file: %s\n", *pcapFile)
+		report, err := pcap.ExtractFromFile(*pcapFile)
+		if err != nil {
+			fatalf("PCAP analysis failed: %v", err)
+		}
+		report.PrintReport()
+		if *pcapOut != "" {
+			if err := report.SaveMessages(*pcapOut); err != nil {
+				fmt.Printf("  Warning: could not save messages: %v\n", err)
+			} else {
+				fmt.Printf("\n  %d message(s) saved to %s\n", report.MessagesFound, *pcapOut)
+				fmt.Printf("  Load them with: -file %s\n", *pcapOut)
+			}
+		} else if report.MessagesFound > 0 {
+			fmt.Printf("\n  Tip: save messages with -pcap-out messages.hl7 to use them in testing\n")
+		}
+		return
+	}
+
+	// ── HL7 Port scan mode ────────────────────────────────────────────────────
+	if *scanRange != "" {
+		fmt.Printf("  Scanning for HL7 MLLP listeners on %s\n", *scanRange)
+		fmt.Printf("  Ports: %s\n\n", *scanPorts)
+		runPortScan(*scanRange, *scanPorts, *timeout, *useTLS || *tlsAuto)
+		return
 	}
 
 	// ── Fuzz mode ────────────────────────────────────────────────────────────
@@ -968,4 +1009,185 @@ EXAMPLES:
   hl7-security-tester -host 10.0.0.5 -port 2575 -file msgs.hl7 -interactive
 
 `)
+}
+
+// runPortScan probes a host or CIDR range for open HL7 MLLP ports.
+// For each open port it attempts an MLLP probe to confirm it is an HL7 listener.
+func runPortScan(target, portsStr string, timeout time.Duration, tryTLS bool) {
+	ports := strings.Split(portsStr, ",")
+
+	// Expand CIDR or treat as single host
+	hosts := expandTargets(target)
+	if len(hosts) == 0 {
+		fmt.Printf("  No valid hosts in target: %s\n", target)
+		return
+	}
+
+	fmt.Printf("  %-20s %-8s %-12s %-20s %s\n", "Host", "Port", "Status", "TLS", "Response")
+	fmt.Println("  " + strings.Repeat("─", 72))
+
+	type result struct {
+		host     string
+		port     string
+		open     bool
+		isHL7    bool
+		tlsInfo  string
+		response string
+	}
+
+	var results []result
+	var mu sync.Mutex
+	var wg sync.WaitGroup
+	sem := make(chan struct{}, 20) // max 20 concurrent probes
+
+	for _, host := range hosts {
+		for _, port := range ports {
+			port = strings.TrimSpace(port)
+			wg.Add(1)
+			sem <- struct{}{}
+			go func(h, p string) {
+				defer wg.Done()
+				defer func() { <-sem }()
+
+				r := result{host: h, port: p}
+				addr := fmt.Sprintf("%s:%s", h, p)
+
+				// TCP connect check
+				conn, err := net.DialTimeout("tcp", addr, timeout)
+				if err != nil {
+					mu.Lock()
+					results = append(results, r)
+					mu.Unlock()
+					return
+				}
+				conn.Close()
+				r.open = true
+
+				// Try MLLP probe — plain first
+				probeCfg := transport.Config{
+					Host:        h,
+					Port:        atoi(p),
+					Timeout:     timeout,
+					ReadTimeout: 5 * time.Second,
+					NoResponse:  false,
+				}
+				pr := transport.ProbeACK(probeCfg)
+				if pr.Connected {
+					r.isHL7 = true
+					r.response = pr.ACKCode
+					if pr.ACKCode == "" && pr.GotResponse {
+						r.response = "responds (no ACK)"
+					} else if !pr.GotResponse {
+						r.response = "open (no response)"
+					}
+				}
+
+				// Try TLS if requested and plain didn't get HL7
+				if tryTLS && !r.isHL7 {
+					tlsCfg := transport.Config{
+						Host:        h,
+						Port:        atoi(p),
+						TLSAuto:     true,
+						SkipVerify:  true,
+						Timeout:     timeout,
+						ReadTimeout: 5 * time.Second,
+					}
+					tlsPr := transport.ProbeACK(tlsCfg)
+					if tlsPr.Connected {
+						r.isHL7 = true
+						r.tlsInfo = tlsPr.TLSVersion
+						r.response = tlsPr.ACKCode
+						if r.response == "" {
+							r.response = "TLS open"
+						}
+					}
+				}
+
+				mu.Lock()
+				results = append(results, r)
+				mu.Unlock()
+			}(host, port)
+		}
+	}
+	wg.Wait()
+
+	// Sort and print results — open ports first
+	sort.Slice(results, func(i, j int) bool {
+		if results[i].open != results[j].open {
+			return results[i].open
+		}
+		return results[i].host < results[j].host
+	})
+
+	found := 0
+	for _, r := range results {
+		if !r.open {
+			continue
+		}
+		status := "open"
+		if r.isHL7 {
+			status = "HL7 ✓"
+			found++
+		}
+		fmt.Printf("  %-20s %-8s %-12s %-20s %s\n",
+			r.host, r.port, status, r.tlsInfo, r.response)
+	}
+
+	fmt.Println()
+	if found > 0 {
+		fmt.Printf("  Found %d HL7 listener(s). Use -host and -port to test them.\n", found)
+	} else {
+		fmt.Println("  No HL7 listeners found on scanned ports.")
+	}
+}
+
+// expandTargets returns individual IP addresses from a host or CIDR.
+func expandTargets(target string) []string {
+	if !strings.Contains(target, "/") {
+		return []string{target}
+	}
+	// CIDR expansion
+	parts := strings.Split(target, "/")
+	if len(parts) != 2 {
+		return []string{target}
+	}
+	var prefix int
+	fmt.Sscanf(parts[1], "%d", &prefix)
+	if prefix < 16 || prefix > 32 {
+		fmt.Printf("  Warning: CIDR prefix /%d is too broad. Limiting to /24 or smaller.\n", prefix)
+		return []string{target}
+	}
+
+	ip := net.ParseIP(parts[0])
+	if ip == nil {
+		return []string{target}
+	}
+	_, ipnet, err := net.ParseCIDR(target)
+	if err != nil {
+		return []string{target}
+	}
+
+	var hosts []string
+	for ip := ip.Mask(ipnet.Mask); ipnet.Contains(ip); incrementIP(ip) {
+		hosts = append(hosts, ip.String())
+		if len(hosts) > 254 {
+			break
+		}
+	}
+	return hosts
+}
+
+func incrementIP(ip net.IP) {
+	for j := len(ip) - 1; j >= 0; j-- {
+		ip[j]++
+		if ip[j] != 0 {
+			break
+		}
+	}
+}
+
+func atoi(s string) int {
+	var n int
+	fmt.Sscanf(s, "%d", &n)
+	return n
 }
