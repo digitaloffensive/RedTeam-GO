@@ -58,7 +58,7 @@ Most red teams register a domain the morning of an engagement. That domain has n
 Requires Go 1.21 or later.
 
 ```bash
-git clone https://github.com/yourhandle/domainsvet
+git clone https://github.com/digitaloffensive/RedTeam-GO/domainsvet
 cd domainsvet
 go build -o domainsvet .
 ```
