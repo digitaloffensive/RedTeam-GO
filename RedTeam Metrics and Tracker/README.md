@@ -26,7 +26,7 @@ Everything is logged on one sheet; the dashboard recalculates automatically.
 - **Blue text** = an input you type.
 - **Grey fill** = a calculated cell - don't edit it.
 - **Yellow fill** = a key assumption on Settings you should set.
-- **Header bands** on the log: **navy** = identity/detection, **green** = containment, **purple** = operator & deconfliction.
+- **Header bands** on the log: **navy** = identity/detection, **green** = containment, **purple** = operator & deconfliction, **blue** = TIBER.
 
 ---
 
@@ -36,6 +36,7 @@ Everything is logged on one sheet; the dashboard recalculates automatically.
 2. **Priority threshold** (yellow): the number of misses + SLA breaches per technique that flags it **High** priority on the dashboard (default 2).
 3. **Engagements** (yellow): name each engagement. These feed the dropdowns and the engagement trend. Fill in start/end dates, trusted agent / white cell, deconfliction contact, ROE reference, and time zone.
 4. **Technique list** (cols O–Q): enter the ATT&CK techniques in scope (ID, name, parent tactic). This powers the Technique drill-down and the Technique ID dropdown on the log.
+5. **TIBER lists** (cols AA/AB): enter the threat-led scenarios and flags (critical functions) for the engagement. These power the TIBER scenario/flag dropdowns on the log and the TIBER breakdowns on the dashboard.
 
 ---
 
@@ -58,6 +59,11 @@ as log entries without affecting the metrics.
 | X–Z | Containment timestamps | Containment Action Started, Host Isolated, C2 Blocked (clock stop) |
 | AC–AJ | Containment calc | Stage latencies, Time-to-Containment, SLA target, within SLA?, Containment Result, Contained? |
 | AK–AU | Operator & deconfliction | Operator, source host/IP, command/procedure, tool/C2, worked?, result, deconfliction status, reported-by, cleanup status/notes, comments |
+| AV–AW | TIBER | Scenario and Flag (critical function) |
+
+Every event carries both classifications side by side: a MITRE ATT&CK tactic +
+technique AND a TIBER scenario + flag. Pick each from its dropdown. The dashboard
+reports on both.
 
 ### Timestamps
 
@@ -116,6 +122,7 @@ drive the gap classification below.
 - **Pipeline stages**: average and max minutes at each stage - shows where time is lost.
 - **By Tactic / Severity / Detection Source**: where detection is weakest, with color scales.
 - **By ATT&CK Technique**: drill-down under each tactic, with a **Top Gap** and a **Priority** flag for detection-engineering backlog.
+- **By TIBER Scenario** and **By TIBER Flag**: detection and containment metrics per threat-led scenario and per critical function, so you can report test effectiveness in TIBER terms.
 - **By Engagement**: detection and containment metrics side by side, so you can see response improving over time.
 
 Everything updates as soon as you log rows - no manual refresh.
@@ -125,7 +132,7 @@ Everything updates as soon as you log rows - no manual refresh.
 ## Before real use
 
 - Replace the placeholder **SLA targets** and **priority threshold** on Settings with your real numbers.
-- Fill in the **technique list** and **engagement details** on Settings.
+- Fill in the **technique list**, **TIBER scenario/flag lists**, and **engagement details** on Settings.
 - **Clear the sample rows (5–19)** on the Activity & Event Log - they exist only so the dashboard renders out of the box.
 - The log holds up to **500 events** (formulas run through row 504).
 
