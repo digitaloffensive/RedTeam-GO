@@ -1,10 +1,10 @@
-# Red Team Detection & Containment Metrics — User Guide
+# Red Team Detection & Containment Metrics - User Guide
 
 A single-workbook tool for tracking red team activity and measuring two
 response metrics against your detection/response SLAs:
 
-- **Time-to-Detection (TTD)** — how long until malicious activity is surfaced to incident responders.
-- **Time-to-Containment (TTC)** — how long until the adversary is actually stopped (C2 blocked).
+- **Time-to-Detection (TTD)** - how long until malicious activity is surfaced to incident responders.
+- **Time-to-Containment (TTC)** - how long until the adversary is actually stopped (C2 blocked).
 
 Everything is logged on one sheet; the dashboard recalculates automatically.
 
@@ -24,7 +24,7 @@ Everything is logged on one sheet; the dashboard recalculates automatically.
 ## Color legend
 
 - **Blue text** = an input you type.
-- **Grey fill** = a calculated cell — don't edit it.
+- **Grey fill** = a calculated cell - don't edit it.
 - **Yellow fill** = a key assumption on Settings you should set.
 - **Header bands** on the log: **navy** = identity/detection, **green** = containment, **purple** = operator & deconfliction.
 
@@ -32,7 +32,7 @@ Everything is logged on one sheet; the dashboard recalculates automatically.
 
 ## First-time setup (Settings tab)
 
-1. **SLA targets per severity** (yellow): set the *TTD SLA Target*, *Triage Threshold*, and *Containment SLA Target* (all in minutes) for Critical / High / Medium / Low. The shipped values are placeholders — replace them with your SOC's real targets.
+1. **SLA targets per severity** (yellow): set the *TTD SLA Target*, *Triage Threshold*, and *Containment SLA Target* (all in minutes) for Critical / High / Medium / Low. The shipped values are placeholders - replace them with your SOC's real targets.
 2. **Priority threshold** (yellow): the number of misses + SLA breaches per technique that flags it **High** priority on the dashboard (default 2).
 3. **Engagements** (yellow): name each engagement. These feed the dropdowns and the engagement trend. Fill in start/end dates, trusted agent / white cell, deconfliction contact, ROE reference, and time zone.
 4. **Technique list** (cols O–Q): enter the ATT&CK techniques in scope (ID, name, parent tactic). This powers the Technique drill-down and the Technique ID dropdown on the log.
@@ -45,7 +45,7 @@ Log **one row per action**. Blue columns are inputs; grey columns calculate them
 
 **A row counts toward the dashboard only when its Severity (column G) is filled.**
 That marks it a *measured detection/containment event*. Actions you log only for
-deconfliction (recon steps, setup, cleanup) — leave Severity blank and they stay
+deconfliction (recon steps, setup, cleanup) - leave Severity blank and they stay
 as log entries without affecting the metrics.
 
 ### Column layout
@@ -62,7 +62,7 @@ as log entries without affecting the metrics.
 ### Timestamps
 
 Enter as date + time, e.g. `2026-09-14 10:32` (24-hour). All latencies are in minutes.
-**Leave a stage's timestamp blank if that stage never happened** — blanks are what
+**Leave a stage's timestamp blank if that stage never happened** - blanks are what
 drive the gap classification below.
 
 ---
@@ -95,7 +95,7 @@ drive the gap classification below.
   2. **Host Isolation Latency** = Host Isolated − Containment Started
   3. **C2 Disruption Latency** = C2 Blocked − Host Isolated
 
-**Containment Result (col AI)** — maps to the three gap areas (host isolation, C2 disruption, workflow):
+**Containment Result (col AI)** - maps to the three gap areas (host isolation, C2 disruption, workflow):
 
 | Result | Meaning |
 |---|---|
@@ -113,12 +113,12 @@ drive the gap classification below.
 - **Left band** = Time-to-Detection; **right band** = Time-to-Containment.
 - **KPIs**: detection/containment rates, % within SLA, mean / median / 90th percentile / max times, and open gaps.
 - **Results breakdowns + pies**: distribution of detection and containment outcomes.
-- **Pipeline stages**: average and max minutes at each stage — shows where time is lost.
+- **Pipeline stages**: average and max minutes at each stage - shows where time is lost.
 - **By Tactic / Severity / Detection Source**: where detection is weakest, with color scales.
 - **By ATT&CK Technique**: drill-down under each tactic, with a **Top Gap** and a **Priority** flag for detection-engineering backlog.
 - **By Engagement**: detection and containment metrics side by side, so you can see response improving over time.
 
-Everything updates as soon as you log rows — no manual refresh.
+Everything updates as soon as you log rows - no manual refresh.
 
 ---
 
@@ -126,11 +126,11 @@ Everything updates as soon as you log rows — no manual refresh.
 
 - Replace the placeholder **SLA targets** and **priority threshold** on Settings with your real numbers.
 - Fill in the **technique list** and **engagement details** on Settings.
-- **Clear the sample rows (5–19)** on the Activity & Event Log — they exist only so the dashboard renders out of the box.
+- **Clear the sample rows (5–19)** on the Activity & Event Log - they exist only so the dashboard renders out of the box.
 - The log holds up to **500 events** (formulas run through row 504).
 
 ## A note on handling
 
-This workbook will hold real operational detail — commands, targets, C2, and
+This workbook will hold real operational detail - commands, targets, C2, and
 deconfliction contacts. Keep it access-controlled and share it only with the
 engagement's authorized stakeholders.
